@@ -258,8 +258,8 @@ public class ClientHandler implements Runnable {
     /** Gửi gói tin tới client này. Có thể được gọi từ nhiều luồng nên phải synchronized. */
     public void send(Packet packet) {
         synchronized (this) {
-            if (out == null) {
-                return;
+            if (out == null || socket.isClosed()) {
+                return; // client đang thoát, bỏ qua
             }
             try {
                 Packet.write(out, packet);

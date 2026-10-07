@@ -8,6 +8,7 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.BindException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -69,6 +70,8 @@ public class FileRelay {
                     closeQuietly(socket);
                 }
             }
+        } catch (BindException e) {
+            ServerLogger.error("Cổng " + port + " đang bận - có thể FileRelay đã chạy rồi");
         } catch (IOException e) {
             ServerLogger.error("FileRelay dừng do lỗi: " + e.getMessage());
         }

@@ -3,6 +3,7 @@ package server;
 import common.Protocol;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.net.BindException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
@@ -59,6 +60,8 @@ public class ChatServer {
                     rejectConnection(socket);
                 }
             }
+        } catch (BindException e) {
+            ServerLogger.error("Cổng " + port + " đang bận - có thể ChatServer đã chạy rồi, hãy tắt bản cũ trước");
         } catch (IOException e) {
             ServerLogger.error("ChatServer dừng do lỗi: " + e.getMessage());
         } finally {
