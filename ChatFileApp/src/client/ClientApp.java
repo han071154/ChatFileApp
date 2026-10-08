@@ -4,10 +4,18 @@
  */
 package client;
 
-/**
- *
- * @author PC_ASUS
- */
+import javax.swing.SwingUtilities;
+import javax.swing.UIManager;
+
+/** Điểm khởi động giao diện Client. */
 public class ClientApp {
-    
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+            } catch (Exception ignored) {
+            }
+            new ChatFrame().setVisible(true);
+        });
+    }
 }
