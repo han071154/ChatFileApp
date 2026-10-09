@@ -13,6 +13,11 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -43,12 +48,23 @@ public class FileRelay {
     private static final int HANDSHAKE_TIMEOUT_MS = 15_000;  // thời gian chờ gói FILE_INIT
     private static final int TRANSFER_IDLE_TIMEOUT_MS = 60_000; // người gửi im lặng quá lâu thì hủy
     private static final long PAIRING_TIMEOUT_SECONDS = 120;   // phiên đã ACCEPT mà không ai kết nối
+    private static final int MAX_HISTORY = 100;
 
     private final int port;
     // transferId -> phiên truyền đã được người nhận chấp nhận
     private final Map<String, Transfer> transfers = new ConcurrentHashMap<>();
     private final ThreadPoolExecutor pool;
     private final ScheduledExecutorService cleaner;
+    // transferId -> trạng thái hiển thị trên giao diện; giữ cả phiên đã xong (tối đa MAX_HISTORY phiên gần nhất)
+    private final Map<String, TransferStatus> statuses = Collections.synchronizedMap(
+            new LinkedHashMap<String, TransferStatus>() {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, TransferStatus> eldest) {
+                    return size() > MAX_HISTORY;
+                }
+            });
+    private volatile boolean running = true;
+    private volatile ServerSocket serverSocket;
 
     public FileRelay(int port) {
         this.port = port;
@@ -59,10 +75,14 @@ public class FileRelay {
     }
 
     public void start() {
-        try (ServerSocket serverSocket = new ServerSocket(port)) {
+        try (ServerSocket ss = new ServerSocket(port)) {
+            serverSocket = ss;
+            if (!running) {
+                return;
+            }
             ServerLogger.info("FileRelay đang lắng nghe tại cổng " + port);
-            while (true) {
-                Socket socket = serverSocket.accept();
+            while (running) {
+                Socket socket = ss.accept();
                 try {
                     pool.execute(() -> handleConnection(socket));
                 } catch (RejectedExecutionException e) {
@@ -73,7 +93,55 @@ public class FileRelay {
         } catch (BindException e) {
             ServerLogger.error("Cổng " + port + " đang bận - có thể FileRelay đã chạy rồi");
         } catch (IOException e) {
-            ServerLogger.error("FileRelay dừng do lỗi: " + e.getMessage());
+            if (running) {
+                ServerLogger.error("FileRelay dừng do lỗi: " + e.getMessage());
+            }
+        }
+    }
+
+    /** Dừng relay: đóng cổng nghe và hủy mọi phiên đang chờ/đang truyền. */
+    public void stop() {
+        running = false;
+        ServerSocket ss = serverSocket;
+        if (ss != null) {
+            try {
+                ss.close();
+            } catch (IOException ignored) {
+            }
+        }
+        for (Transfer t : transfers.values()) {
+            t.cancelled = true;
+            t.close();
+        }
+        transfers.clear();
+        for (TransferStatus s : getTransferStatuses()) {
+            s.finish("Server dừng");
+        }
+        pool.shutdownNow();
+        cleaner.shutdownNow();
+        ServerLogger.info("FileRelay đã dừng");
+    }
+
+    /** Bản sao trạng thái các phiên truyền, cũ trước mới sau (dùng cho giao diện server). */
+    public List<TransferStatus> getTransferStatuses() {
+        synchronized (statuses) {
+            return new ArrayList<>(statuses.values());
+        }
+    }
+
+    // ================== Theo dõi trạng thái (gọi từ ClientHandler) ==================
+
+    /** Ghi nhận yêu cầu gửi file (FILE_REQ) để giao diện hiển thị tên file, dung lượng. */
+    public void noteRequest(String transferId, String sender, String receiver, String fileName, long fileSize) {
+        // putIfAbsent: không cho một FILE_REQ khác ghi đè phiên đã có cùng id
+        statuses.putIfAbsent(transferId, new TransferStatus(transferId, sender, receiver, fileName, fileSize));
+    }
+
+    /** Người nhận từ chối (FILE_RESP REJECT). */
+    public void markRejected(String transferId, String receiver) {
+        TransferStatus s = statuses.get(transferId);
+        if (s != null && s.receiver.equals(receiver)) {
+            s.finish("Bị từ chối");
         }
     }
 
@@ -82,7 +150,11 @@ public class FileRelay {
     /** Cho phép phiên truyền transferId (gọi khi người nhận ACCEPT). Gọi lại với cùng id để truyền tiếp. */
     public void authorize(String transferId, String sender, InetAddress senderAddress,
                           String receiver, InetAddress receiverAddress) {
-        Transfer transfer = new Transfer(transferId, sender, senderAddress, receiver, receiverAddress);
+        TransferStatus status = statuses.compute(transferId, (id, s) ->
+                s != null && s.sender.equals(sender) && s.receiver.equals(receiver)
+                        ? s : new TransferStatus(id, sender, receiver, null, -1));
+        status.setState("Chờ kết nối");
+        Transfer transfer = new Transfer(transferId, sender, senderAddress, receiver, receiverAddress, status);
         Transfer old = transfers.put(transferId, transfer);
         if (old != null) {
             old.close(); // phiên cũ cùng id (vd: đang truyền dở) bị thay bằng phiên mới
@@ -91,6 +163,7 @@ public class FileRelay {
             if (!transfer.isStarted() && transfers.remove(transferId, transfer)) {
                 ServerLogger.warn("[" + transferId + "] Hết thời gian chờ ghép cặp, hủy phiên");
                 transfer.close();
+                status.finish("Hết thời gian chờ");
             }
         }, PAIRING_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
@@ -101,6 +174,11 @@ public class FileRelay {
         if (transfer != null && transfer.involves(requestedBy) && transfers.remove(transferId, transfer)) {
             transfer.cancelled = true;
             transfer.close();
+        }
+        // Hủy cả khi chưa ACCEPT (phiên chỉ mới có trong bảng trạng thái)
+        TransferStatus status = statuses.get(transferId);
+        if (status != null && status.involves(requestedBy)) {
+            status.finish("Đã hủy");
         }
     }
 
@@ -189,6 +267,8 @@ public class FileRelay {
             ServerLogger.info("[" + t.id + "] Bắt đầu chuyển tiếp '" + t.sender + "' -> '" + t.receiver
                     + "'" + (t.offset > 0 ? " (truyền tiếp từ byte " + t.offset + ")" : ""));
 
+            t.status.setState("Đang truyền");
+            t.status.setBytes(t.offset);
             t.senderSide.socket.setSoTimeout(TRANSFER_IDLE_TIMEOUT_MS);
             t.receiverSide.socket.setSoTimeout(0);
             // Dùng lại stream đã bọc buffer để không mất byte đã đọc trước vào buffer
@@ -199,6 +279,7 @@ public class FileRelay {
             while ((n = from.read(buffer)) != -1) {
                 to.write(buffer, 0, n);
                 bytes += n;
+                t.status.setBytes(t.offset + bytes);
             }
             to.flush();
             t.receiverSide.socket.shutdownOutput(); // báo EOF cho người nhận
@@ -211,6 +292,11 @@ public class FileRelay {
             transfers.remove(t.id, t);
             t.close();
         }
+        long fileSize = t.status.getFileSize();
+        if ("Hoàn tất".equals(result) && fileSize > 0 && t.offset + bytes < fileSize) {
+            result = "Thiếu dữ liệu"; // người gửi đóng kết nối trước khi gửi đủ file
+        }
+        t.status.finish(result);
 
         long ms = Math.max(1, System.currentTimeMillis() - startTime);
         ServerLogger.info(String.format("[%s] %s: %,d bytes trong %.1f s (%.2f MB/s)",
@@ -244,6 +330,7 @@ public class FileRelay {
         final String receiver;
         final InetAddress senderAddress;
         final InetAddress receiverAddress;
+        final TransferStatus status;
         Endpoint senderSide;
         Endpoint receiverSide;
         long offset;
@@ -251,12 +338,14 @@ public class FileRelay {
         volatile boolean cancelled;
         private volatile boolean closed;
 
-        Transfer(String id, String sender, InetAddress senderAddress, String receiver, InetAddress receiverAddress) {
+        Transfer(String id, String sender, InetAddress senderAddress, String receiver, InetAddress receiverAddress,
+                 TransferStatus status) {
             this.id = id;
             this.sender = sender;
             this.senderAddress = senderAddress;
             this.receiver = receiver;
             this.receiverAddress = receiverAddress;
+            this.status = status;
         }
 
         boolean involves(String user) {
@@ -281,6 +370,65 @@ public class FileRelay {
             closed = true;
             if (senderSide != null) closeQuietly(senderSide.socket);
             if (receiverSide != null) closeQuietly(receiverSide.socket);
+        }
+    }
+
+    /** Thông tin một phiên truyền để hiển thị: ai gửi ai, file gì, đã chuyển bao nhiêu byte, trạng thái. */
+    public static final class TransferStatus {
+        private final String id;
+        private final String sender;
+        private final String receiver;
+        private final String fileName;
+        private final long fileSize; // -1 nếu không biết
+        private final LocalDateTime createdAt = LocalDateTime.now();
+        private volatile long bytes;
+        private volatile String state = "Chờ đồng ý";
+        private volatile boolean finished;
+
+        TransferStatus(String id, String sender, String receiver, String fileName, long fileSize) {
+            this.id = id;
+            this.sender = sender;
+            this.receiver = receiver;
+            this.fileName = fileName == null ? "?" : fileName;
+            this.fileSize = fileSize;
+        }
+
+        /** Cập nhật trạng thái đang diễn ra (gọi lại được khi truyền tiếp). */
+        synchronized void setState(String state) {
+            this.state = state;
+            this.finished = false;
+        }
+
+        /** Kết thúc phiên; chỉ ghi nhận lần đầu (vd: "Đã hủy" không bị "Mất kết nối" ghi đè). */
+        synchronized void finish(String state) {
+            if (!finished) {
+                this.state = state;
+                this.finished = true;
+            }
+        }
+
+        void setBytes(long bytes) {
+            this.bytes = bytes;
+        }
+
+        boolean involves(String user) {
+            return sender.equals(user) || receiver.equals(user);
+        }
+
+        public String getId() { return id; }
+        public String getSender() { return sender; }
+        public String getReceiver() { return receiver; }
+        public String getFileName() { return fileName; }
+        public long getFileSize() { return fileSize; }
+        public long getBytes() { return bytes; }
+        public String getState() { return state; }
+        public boolean isFinished() { return finished; }
+        public LocalDateTime getCreatedAt() { return createdAt; }
+
+        /** Phần trăm đã chuyển (0-100), -1 nếu không biết dung lượng file. */
+        public int getPercent() {
+            if (fileSize <= 0) return -1;
+            return (int) Math.min(100, bytes * 100 / fileSize);
         }
     }
 }

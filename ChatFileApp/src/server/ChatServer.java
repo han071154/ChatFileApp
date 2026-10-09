@@ -8,9 +8,11 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.SynchronousQueue;
@@ -33,11 +35,15 @@ public class ChatServer {
     private final Map<String, ClientHandler> onlineUsers = new ConcurrentHashMap<>();
     // tên nhóm -> tập username thành viên
     private final Map<String, Set<String>> groups = new ConcurrentHashMap<>();
+    // mọi kết nối đang mở (kể cả chưa đăng nhập), dùng để ngắt hết khi dừng server
+    private final Set<ClientHandler> connections = ConcurrentHashMap.newKeySet();
 
     private final int port;
     private final FileRelay fileRelay;
     private final ThreadPoolExecutor clientPool;
     private volatile boolean running = true;
+    private volatile boolean listening;
+    private volatile ServerSocket serverSocket;
 
     public ChatServer(int port, FileRelay fileRelay) {
         this.port = port;
@@ -48,14 +54,23 @@ public class ChatServer {
                 new SynchronousQueue<>(), namedThreadFactory("chat"));
     }
 
+    /** Chạy vòng lặp nhận kết nối; chỉ trả về khi server dừng (stop() hoặc lỗi). */
     public void start() {
-        try (ServerSocket serverSocket = new ServerSocket(port)) {
+        try (ServerSocket ss = new ServerSocket(port)) {
+            serverSocket = ss;
+            if (!running) {
+                return; // stop() được gọi trước khi kịp mở cổng
+            }
+            listening = true;
             ServerLogger.info("ChatServer đang lắng nghe tại cổng " + port + " (tối đa " + MAX_CLIENTS + " client)");
             while (running) {
-                Socket socket = serverSocket.accept();
+                Socket socket = ss.accept();
+                ClientHandler handler = new ClientHandler(socket, this);
+                connections.add(handler);
                 try {
-                    clientPool.execute(new ClientHandler(socket, this));
+                    clientPool.execute(handler);
                 } catch (RejectedExecutionException e) {
+                    connections.remove(handler);
                     ServerLogger.warn("Server đầy, từ chối kết nối từ " + socket.getRemoteSocketAddress());
                     rejectConnection(socket);
                 }
@@ -63,10 +78,38 @@ public class ChatServer {
         } catch (BindException e) {
             ServerLogger.error("Cổng " + port + " đang bận - có thể ChatServer đã chạy rồi, hãy tắt bản cũ trước");
         } catch (IOException e) {
-            ServerLogger.error("ChatServer dừng do lỗi: " + e.getMessage());
+            if (running) {
+                ServerLogger.error("ChatServer dừng do lỗi: " + e.getMessage());
+            }
         } finally {
+            listening = false;
             clientPool.shutdownNow();
         }
+    }
+
+    /** Dừng server: đóng cổng nghe và ngắt kết nối mọi client đang online. */
+    public void stop() {
+        running = false;
+        ServerSocket ss = serverSocket;
+        if (ss != null) {
+            try {
+                ss.close(); // accept() đang chờ sẽ ném SocketException và thoát vòng lặp
+            } catch (IOException ignored) {
+            }
+        }
+        for (ClientHandler h : connections) { // gồm cả các kết nối chưa đăng nhập
+            h.disconnect();
+        }
+        clientPool.shutdownNow();
+        ServerLogger.info("ChatServer đã dừng");
+    }
+
+    public boolean isListening() {
+        return listening;
+    }
+
+    public int getPort() {
+        return port;
     }
 
     private void rejectConnection(Socket socket) {
@@ -102,6 +145,29 @@ public class ChatServer {
 
     public ClientHandler getUser(String username) {
         return onlineUsers.get(username);
+    }
+
+    /** ClientHandler gọi khi kết nối đã đóng hẳn. */
+    void connectionClosed(ClientHandler handler) {
+        connections.remove(handler);
+    }
+
+    /** Danh sách user đang online, sắp theo tên (dùng cho giao diện server). */
+    public List<ClientHandler> getOnlineHandlers() {
+        List<ClientHandler> list = new ArrayList<>(onlineUsers.values());
+        list.sort(Comparator.comparing(ClientHandler::getUsername));
+        return list;
+    }
+
+    /** Bản sao danh sách nhóm: tên nhóm -> thành viên, đều đã sắp xếp. */
+    public Map<String, List<String>> getGroupsSnapshot() {
+        Map<String, List<String>> snapshot = new TreeMap<>();
+        for (Map.Entry<String, Set<String>> e : groups.entrySet()) {
+            List<String> members = new ArrayList<>(e.getValue());
+            Collections.sort(members);
+            snapshot.put(e.getKey(), members);
+        }
+        return snapshot;
     }
 
     public void broadcast(Packet packet, String exceptUser) {
