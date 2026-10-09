@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.net.SocketException;
+import java.time.LocalDateTime;
 
 /**
  * Phục vụ một client trên kênh chat (cổng 5000), chạy trong Thread Pool của ChatServer.
@@ -27,6 +28,7 @@ public class ClientHandler implements Runnable {
     private DataInputStream in;
     private DataOutputStream out;
     private volatile String username;
+    private volatile LocalDateTime loginTime;
 
     public ClientHandler(Socket socket, ChatServer server) {
         this.socket = socket;
@@ -35,6 +37,10 @@ public class ClientHandler implements Runnable {
 
     public String getUsername() {
         return username;
+    }
+
+    public LocalDateTime getLoginTime() {
+        return loginTime;
     }
 
     public InetAddress getRemoteAddress() {
@@ -69,6 +75,7 @@ public class ClientHandler implements Runnable {
                 ServerLogger.info("User '" + username + "' đã thoát");
             }
             close();
+            server.connectionClosed(this);
             ServerLogger.info("Đóng kết nối " + address);
         }
     }
@@ -100,6 +107,7 @@ public class ClientHandler implements Runnable {
             }
 
             username = name;
+            loginTime = LocalDateTime.now();
             ServerLogger.info("User '" + username + "' đăng nhập từ " + socket.getRemoteSocketAddress());
             send(new Packet(Protocol.CMD_LOGIN_OK).put("username", username));
             send(server.groupListPacket());
@@ -225,6 +233,10 @@ public class ClientHandler implements Runnable {
         if (Protocol.CMD_FILE_REQ.equals(type)) {
             ServerLogger.info("'" + username + "' yêu cầu gửi file '" + packet.get("fileName") + "' ("
                     + packet.get("fileSize") + " bytes) cho '" + otherUser + "' [" + transferId + "]");
+            if (otherUser != null && server.getUser(otherUser) != null) {
+                server.getFileRelay().noteRequest(transferId, username, otherUser,
+                        packet.get("fileName"), packet.getLong("fileSize", -1));
+            }
         } else if (Protocol.CMD_FILE_RESP.equals(type)) {
             boolean accepted = Protocol.STATUS_ACCEPT.equals(packet.get("status"));
             ClientHandler sender = otherUser == null ? null : server.getUser(otherUser);
@@ -232,6 +244,8 @@ public class ClientHandler implements Runnable {
                 // otherUser là người gửi file, user hiện tại là người nhận
                 server.getFileRelay().authorize(transferId, otherUser, sender.getRemoteAddress(),
                         username, getRemoteAddress());
+            } else if (!accepted) {
+                server.getFileRelay().markRejected(transferId, username);
             }
             ServerLogger.info("'" + username + "' " + (accepted ? "đồng ý" : "từ chối")
                     + " nhận file từ '" + otherUser + "' [" + transferId + "]");
@@ -277,6 +291,18 @@ public class ClientHandler implements Runnable {
 
     private String describe() {
         return username != null ? "'" + username + "'" : String.valueOf(socket.getRemoteSocketAddress());
+    }
+
+    /** Đóng kết nối từ phía server (dừng server); luồng đọc sẽ thoát và tự dọn dẹp. */
+    public void disconnect() {
+        close();
+    }
+
+    /** Server chủ động ngắt một user: báo lý do cho client rồi đóng kết nối. */
+    public void kick(String reason) {
+        send(error(reason));
+        ServerLogger.warn("Server ngắt kết nối " + describe() + ": " + reason);
+        close();
     }
 
     private void close() {

@@ -9,6 +9,9 @@ import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Consumer;
 
 /**
  * Ghi log hệ thống ra màn hình console và file server.log (ghi nối tiếp).
@@ -19,6 +22,8 @@ public class ServerLogger {
     // In ra console bằng UTF-8 để cửa sổ Output của NetBeans hiển thị đúng tiếng Việt
     private static final PrintStream CONSOLE = new PrintStream(new FileOutputStream(FileDescriptor.out), true, StandardCharsets.UTF_8);
     private static PrintWriter fileWriter;
+    // Nơi nhận thêm từng dòng log (vd: khung log của ServerFrame)
+    private static final List<Consumer<String>> listeners = new CopyOnWriteArrayList<>();
 
     public static synchronized void init(String logFile) {
         try {
@@ -26,6 +31,14 @@ public class ServerLogger {
         } catch (IOException e) {
             System.err.println("Không mở được file log " + logFile + ": " + e.getMessage());
         }
+    }
+
+    public static void addListener(Consumer<String> listener) {
+        listeners.add(listener);
+    }
+
+    public static void removeListener(Consumer<String> listener) {
+        listeners.remove(listener);
     }
 
     public static void info(String message) {
@@ -45,6 +58,9 @@ public class ServerLogger {
         CONSOLE.println(line);
         if (fileWriter != null) {
             fileWriter.println(line);
+        }
+        for (Consumer<String> listener : listeners) {
+            listener.accept(line);
         }
     }
 }
