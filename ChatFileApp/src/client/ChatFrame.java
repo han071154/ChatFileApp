@@ -160,12 +160,26 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         final String who;
         final String time;
         final String text;
+        // Chỉ có ở mục "file trong nhóm": hiện kèm nút "Tải về"
+        final String fileGroup;
+        final String fileId;
+        final String fileName;
+        final long fileSize;
 
         Entry(int kind, String who, String time, String text) {
+            this(kind, who, time, text, null, null, null, 0);
+        }
+
+        Entry(int kind, String who, String time, String text,
+              String fileGroup, String fileId, String fileName, long fileSize) {
             this.kind = kind;
             this.who = who;
             this.time = time;
             this.text = text;
+            this.fileGroup = fileGroup;
+            this.fileId = fileId;
+            this.fileName = fileName;
+            this.fileSize = fileSize;
         }
     }
 
@@ -548,13 +562,13 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         messageField.requestFocusInWindow();
     }
 
-    /** Khóa ô nhập khi chưa chọn cuộc trò chuyện hoặc chưa vào nhóm; nút Gửi file chỉ dùng cho chat 1-1. */
+    /** Khóa ô nhập khi chưa chọn cuộc trò chuyện hoặc chưa vào nhóm; khi đang truyền file thì khóa nút Gửi file. */
     private void updateInputState() {
         boolean group = isGroupConversation();
         boolean canType = currentKey != null && (!group || isMember(currentName()));
         messageField.setEnabled(canType);
         sendButton.setEnabled(canType);
-        fileButton.setEnabled(currentKey != null && !group && activeTransferId == null);
+        fileButton.setEnabled(canType && activeTransferId == null);
     }
 
     private void updateChatTitle() {
@@ -593,15 +607,17 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
     }
 
     private void chooseAndSendFile() {
-        if (isGroupConversation()) {
-            JOptionPane.showMessageDialog(this, "Gửi file chỉ hỗ trợ chat 1-1. Hãy chọn một người dùng.", "Không hỗ trợ", JOptionPane.INFORMATION_MESSAGE);
+        // Trong nhóm: tải file lên kho của nhóm (server lưu lại), thành viên nào cần thì tự bấm "Tải về"
+        String group = isGroupConversation() ? currentName() : null;
+        if (group != null && !isMember(group)) {
+            JOptionPane.showMessageDialog(this, "Hãy vào nhóm trước khi gửi file.", "Chưa vào nhóm", JOptionPane.WARNING_MESSAGE);
             return;
         }
         if (activeTransferId != null) {
             JOptionPane.showMessageDialog(this, "Đang có một phiên truyền file. Hãy đợi hoặc bấm Hủy.", "Đang bận", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
-        if (selectedUser == null || selectedUser.equals(client.getUsername())) {
+        if (group == null && (selectedUser == null || selectedUser.equals(client.getUsername()))) {
             JOptionPane.showMessageDialog(this, "Hãy chọn người nhận file trước.", "Chưa chọn người nhận", JOptionPane.WARNING_MESSAGE);
             return;
         }
@@ -615,7 +631,7 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         }
 
         String transferId = UUID.randomUUID().toString();
-        String receiver = selectedUser;
+        String receiver = group != null ? "g:" + group : selectedUser; // "g:<nhóm>" = tải lên kho file nhóm
         // Chiếm chỗ "đang bận" ngay để chặn thao tác khác trong lúc tính SHA-256 (có thể mất vài giây với file lớn).
         beginTransfer(transferId, receiver);
         progressBar.setValue(0);
@@ -641,10 +657,16 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
                 pendingInfos.put(transferId, new FileInfo(transferId, client.getUsername(), receiver, file.getName(), file.length()));
                 pendingCrypto.put(transferId, new TransferCrypto(aesKey, aesIv, sha256));
                 try {
-                    client.sendFileRequest(receiver, transferId, file.getName(), file.length(),
-                            sha256, CryptoUtil.encodeBase64(aesKey), CryptoUtil.encodeBase64(aesIv));
-                    appendSystem("Đã gửi yêu cầu gửi file '" + file.getName() + "' tới " + receiver + ". Đang chờ đồng ý...");
-                    progressLabel.setText("Chờ nhận file...");
+                    if (group != null) {
+                        client.uploadGroupFile(group, transferId, file.getName(), file.length(),
+                                sha256, CryptoUtil.encodeBase64(aesKey), CryptoUtil.encodeBase64(aesIv));
+                        progressLabel.setText("Chờ server...");
+                    } else {
+                        client.sendFileRequest(receiver, transferId, file.getName(), file.length(),
+                                sha256, CryptoUtil.encodeBase64(aesKey), CryptoUtil.encodeBase64(aesIv));
+                        appendSystem("Đã gửi yêu cầu gửi file '" + file.getName() + "' tới " + receiver + ". Đang chờ đồng ý...");
+                        progressLabel.setText("Chờ nhận file...");
+                    }
                 } catch (IOException ex) {
                     pendingFiles.remove(transferId);
                     pendingInfos.remove(transferId);
@@ -686,7 +708,9 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
                             pendingInfos.remove(transferId);
                             pendingCrypto.remove(transferId);
                             endTransfer();
-                            appendSystem("Đã gửi file '" + fileName + "' tới " + receiver + ".");
+                            appendSystem(isGroupPeer(receiver)
+                                    ? "Đã tải file '" + fileName + "' lên nhóm " + receiver.substring(2) + "."
+                                    : "Đã gửi file '" + fileName + "' tới " + receiver + ".");
                         });
                     }
                     @Override public void onError(String message) {
@@ -724,8 +748,13 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         transferResumable = false;
         resumeButton.setVisible(false);
         try {
-            client.sendFileRequest(activePeer, transferId, file.getName(), file.length(),
-                    crypto.sha256(), CryptoUtil.encodeBase64(crypto.aesKey()), CryptoUtil.encodeBase64(crypto.aesIv()));
+            if (isGroupPeer(activePeer)) {
+                client.uploadGroupFile(activePeer.substring(2), transferId, file.getName(), file.length(),
+                        crypto.sha256(), CryptoUtil.encodeBase64(crypto.aesKey()), CryptoUtil.encodeBase64(crypto.aesIv()));
+            } else {
+                client.sendFileRequest(activePeer, transferId, file.getName(), file.length(),
+                        crypto.sha256(), CryptoUtil.encodeBase64(crypto.aesKey()), CryptoUtil.encodeBase64(crypto.aesIv()));
+            }
             appendSystem("Đang thử truyền tiếp file '" + file.getName() + "'...");
         } catch (IOException ex) {
             showError(ex.getMessage());
@@ -766,6 +795,7 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         pendingInfos.clear();
         pendingCrypto.clear();
         incomingSaveDirs.clear();
+        groupDownloadIds.clear();
         endTransfer();
         updateProgress(0, "Sẵn sàng");
         setCursor(java.awt.Cursor.getDefaultCursor());
@@ -790,9 +820,12 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
             case ServerCommands.GROUP_LIST -> updateGroupList(packet.get("groups"));
             case ServerCommands.GROUP_UPDATE -> handleGroupUpdate(packet);
             case ServerCommands.GROUP_MSG -> appendChat(new Message(packet.get("from"), "g:" + packet.get("group"), packet.get("content")));
+            case ServerCommands.GROUP_FILE -> handleGroupFile(packet);
+            case ServerCommands.GROUP_FILE_UPLOAD_OK -> handleGroupUploadOk(packet);
+            case ServerCommands.GROUP_FILE_DOWNLOAD_OK -> handleGroupDownloadOk(packet);
             case Protocol.CMD_FILE_REQ -> handleIncomingFileRequest(packet);
             case Protocol.CMD_FILE_RESP -> handleFileResponse(packet);
-            case ServerCommands.ERROR -> appendSystem("Lỗi server: " + packet.get("reason"));
+            case ServerCommands.ERROR -> handleServerError(packet);
             default -> {
                 // Các gói group có thể được server gửi; giao diện này tập trung chat 1-1.
             }
@@ -920,6 +953,7 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
                         SwingUtilities.invokeLater(() -> {
                             updateProgress(100, "Nhận xong");
                             incomingSaveDirs.remove(transferId);
+                            groupDownloadIds.values().remove(transferId);
                             endTransfer();
                             appendSystem("Đã nhận file '" + fileName + "' vào " + saveDir.getAbsolutePath()
                                     + " (đã xác minh SHA-256).");
@@ -930,6 +964,10 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
                         // và lần FILE_REQ kế tiếp với cùng transferId sẽ tự nhận tiếp (xem phía trên).
                         SwingUtilities.invokeLater(() -> {
                             appendSystem(message);
+                            if (groupDownloadIds.containsValue(transferId)
+                                    && new File(saveDir, transferId + ".part").exists()) {
+                                appendSystem("Bấm 'Tải về' ở file đó lần nữa để tải tiếp phần còn thiếu.");
+                            }
                             endTransfer();
                         });
                     }
@@ -986,6 +1024,101 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         }
     }
 
+    // ---------- Kho file nhóm ----------
+
+    // fileId -> transferId của lần tải về còn dở (tệp .part còn trong thư mục đã chọn) để bấm "Tải về" lần nữa thì tải tiếp
+    private final java.util.Map<String, String> groupDownloadIds = new java.util.HashMap<>();
+
+    private static boolean isGroupPeer(String peer) {
+        return peer != null && peer.startsWith("g:");
+    }
+
+    /** Nhóm có file mới (hoặc file đã có khi mình vừa vào nhóm): hiện trong khung chat kèm nút "Tải về". */
+    private void handleGroupFile(Packet packet) {
+        String group = packet.get("group");
+        String from = packet.get("from") == null ? "Không rõ" : packet.get("from");
+        String fileName = packet.get("fileName") == null ? "file" : new File(packet.get("fileName")).getName();
+        long fileSize = packet.getLong("fileSize", 0);
+        String time;
+        try {
+            time = java.time.LocalDateTime.parse(packet.get("time")).format(TIME_FORMAT);
+        } catch (RuntimeException e) {
+            time = java.time.LocalTime.now().format(TIME_FORMAT);
+        }
+        boolean mine = from.equals(client.getUsername());
+        appendEntry("g:" + group, new Entry(mine ? Entry.MINE : Entry.OTHER, mine ? "Bạn" : from, time,
+                "File: " + fileName + "  (" + formatBytes(fileSize) + ")",
+                group, packet.get("fileId"), fileName, fileSize));
+    }
+
+    /** Server đồng ý cho tải lên nhóm: bắt đầu gửi dữ liệu qua cổng 5001. */
+    private void handleGroupUploadOk(Packet packet) {
+        String transferId = packet.get("transferId");
+        FileInfo info = transferId == null ? null : pendingInfos.get(transferId);
+        if (info == null || !transferId.equals(activeTransferId)) return;
+        appendSystem("Đang tải file '" + info.getFileName() + "' lên nhóm " + packet.get("group") + "...");
+        startSendingFile("g:" + packet.get("group"), transferId, info.getFileName(), info.getFileSize());
+    }
+
+    /** Bấm "Tải về" trên một file của nhóm. */
+    private void downloadGroupFile(Entry e) {
+        if (client == null || !client.isConnected()) return;
+        if (!isMember(e.fileGroup)) {
+            JOptionPane.showMessageDialog(this, "Bạn cần ở trong nhóm '" + e.fileGroup + "' để tải file.", "Chưa vào nhóm", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        if (activeTransferId != null) {
+            JOptionPane.showMessageDialog(this, "Đang có một phiên truyền file. Hãy đợi hoặc bấm Hủy.", "Đang bận", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        // Lần tải trước bị đứt giữa chừng: dùng lại transferId + thư mục cũ để tải tiếp phần còn thiếu
+        String transferId = groupDownloadIds.get(e.fileId);
+        File saveDir = transferId == null ? null : incomingSaveDirs.get(transferId);
+        if (saveDir == null || !new File(saveDir, transferId + ".part").exists()) {
+            JFileChooser chooser = new JFileChooser();
+            chooser.setDialogTitle("Chọn thư mục lưu '" + e.fileName + "'");
+            chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+            if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+            saveDir = chooser.getSelectedFile();
+            transferId = UUID.randomUUID().toString();
+            groupDownloadIds.put(e.fileId, transferId);
+        }
+        incomingSaveDirs.put(transferId, saveDir);
+        beginTransfer(transferId, "g:" + e.fileGroup);
+        progressBar.setValue(0);
+        progressLabel.setText("Chờ server...");
+        try {
+            client.downloadGroupFile(e.fileGroup, e.fileId, transferId);
+        } catch (IOException ex) {
+            endTransfer();
+            showError(ex.getMessage());
+        }
+    }
+
+    /** Server gửi khóa AES + SHA-256 của file nhóm: bắt đầu tải về qua cổng 5001. */
+    private void handleGroupDownloadOk(Packet packet) {
+        String transferId = packet.get("transferId");
+        File saveDir = transferId == null ? null : incomingSaveDirs.get(transferId);
+        if (saveDir == null || !transferId.equals(activeTransferId)) return;
+        String fileName = packet.get("fileName") == null ? "file_nhan_duoc" : new File(packet.get("fileName")).getName();
+        startReceivingFile("nhóm " + packet.get("group"), transferId, fileName, packet.getLong("fileSize", 0), saveDir,
+                CryptoUtil.decodeBase64(packet.get(Protocol.FIELD_AES_KEY)),
+                CryptoUtil.decodeBase64(packet.get(Protocol.FIELD_AES_IV)),
+                packet.get(Protocol.FIELD_SHA256));
+    }
+
+    /** Lỗi từ server; nếu lỗi gắn với phiên truyền đang chạy (vd: tải file nhóm bị từ chối) thì kết thúc phiên đó. */
+    private void handleServerError(Packet packet) {
+        appendSystem("Lỗi server: " + packet.get("reason"));
+        String id = packet.get("transferId");
+        if (id == null || !id.equals(activeTransferId)) return;
+        pendingFiles.remove(id);
+        pendingInfos.remove(id);
+        pendingCrypto.remove(id);
+        updateProgress(0, "Thất bại");
+        endTransfer();
+    }
+
     private void beginTransfer(String transferId, String peer) {
         activeTransferId = transferId;
         activePeer = peer;
@@ -1006,9 +1139,14 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
     private void cancelTransfer() {
         if (activeTransferId == null) return;
         try {
-            client.cancelFile(activePeer, activeTransferId);
+            if (isGroupPeer(activePeer)) {
+                client.cancelGroupTransfer(activeTransferId);
+            } else {
+                client.cancelFile(activePeer, activeTransferId);
+            }
         } catch (IOException ignored) {
         }
+        groupDownloadIds.values().remove(activeTransferId);
         pendingFiles.remove(activeTransferId);
         pendingInfos.remove(activeTransferId);
         pendingCrypto.remove(activeTransferId);
@@ -1171,8 +1309,21 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
             int s2 = doc.getLength();
             doc.insertString(s2, body, textStyle(14, false, false, mine ? Color.WHITE : TEXT_MAIN,
                     mine ? PRIMARY : BUBBLE_OTHER));
-            doc.insertString(s2 + body.length(), "\n", textStyle(14, false, false, TEXT_MAIN, null));
-            doc.setParagraphAttributes(s2, body.length() + 1, paragraphStyle(align, left, right, 12), false);
+            int bodyLength = body.length();
+            if (e.fileId != null) { // file trong nhóm: thêm nút "Tải về" ngay sau bong bóng
+                JButton download = new AccentButton("Tải về", true);
+                download.setFont(ui(Font.BOLD, 12));
+                download.setMargin(new Insets(2, 10, 2, 10));
+                download.setAlignmentY(0.75f);
+                download.addActionListener(ev -> downloadGroupFile(e));
+                SimpleAttributeSet button = new SimpleAttributeSet();
+                StyleConstants.setComponent(button, download);
+                doc.insertString(s2 + bodyLength, " ", textStyle(14, false, false, TEXT_MAIN, null));
+                doc.insertString(s2 + bodyLength + 1, " ", button);
+                bodyLength += 2;
+            }
+            doc.insertString(s2 + bodyLength, "\n", textStyle(14, false, false, TEXT_MAIN, null));
+            doc.setParagraphAttributes(s2, bodyLength + 1, paragraphStyle(align, left, right, 12), false);
         } catch (BadLocationException ignored) {
         }
     }

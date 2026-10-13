@@ -22,6 +22,17 @@ public final class ServerCommands {
     public static final String GROUP_LIST = "GROUP_LIST";     // S->C {type, groups: "g1,g2"}
     public static final String GROUP_UPDATE = "GROUP_UPDATE"; // S->C {type, group, members: "u1,u2"}
 
+    // Kho file của nhóm (xem GroupFileStore): tải lên server một lần, thành viên tự tải về khi cần
+    // C->S {type, group, transferId, fileName, fileSize, sha256, aesKey, aesIv}; gửi lại cùng transferId = tải lên tiếp
+    public static final String GROUP_FILE_UPLOAD = "GROUP_FILE_UPLOAD";
+    public static final String GROUP_FILE_UPLOAD_OK = "GROUP_FILE_UPLOAD_OK";     // S->C {type, group, transferId}
+    // S->C mọi thành viên khi có file mới (và người mới vào nhóm nhận các file đã có):
+    // {type, group, fileId, from, fileName, fileSize, time}
+    public static final String GROUP_FILE = "GROUP_FILE";
+    public static final String GROUP_FILE_DOWNLOAD = "GROUP_FILE_DOWNLOAD";       // C->S {type, group, fileId, transferId}
+    // S->C {type, group, fileId, transferId, fileName, fileSize, sha256, aesKey, aesIv}
+    public static final String GROUP_FILE_DOWNLOAD_OK = "GROUP_FILE_DOWNLOAD_OK";
+
     // Truyền file
     public static final String FILE_CANCEL = "FILE_CANCEL";   // {type, to, transferId}
     public static final String READY = "READY";               // FileRelay -> client, kèm "offset" cho SENDER

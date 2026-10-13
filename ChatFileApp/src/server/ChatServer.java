@@ -48,6 +48,7 @@ public class ChatServer {
     public ChatServer(int port, FileRelay fileRelay) {
         this.port = port;
         this.fileRelay = fileRelay;
+        fileRelay.getGroupFiles().setServer(this);
         // SynchronousQueue: không xếp hàng chờ, quá MAX_CLIENTS luồng thì ném RejectedExecutionException
         this.clientPool = new ThreadPoolExecutor(
                 0, MAX_CLIENTS, 60, TimeUnit.SECONDS,
@@ -221,6 +222,7 @@ public class ChatServer {
             return false;
         }
         if (remaining == null) {
+            fileRelay.getGroupFiles().removeGroup(group);
             broadcastGroupList();
         } else {
             sendGroupUpdate(group);
