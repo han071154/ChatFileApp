@@ -150,12 +150,21 @@ public class ChatClient {
         send(new Packet(ServerCommands.GROUP_MSG).put("group", group).put("content", content));
     }
 
-    public void sendFileRequest(String toUser, String transferId, String fileName, long fileSize) throws IOException {
+    /**
+     * Gửi yêu cầu truyền file, kèm mã băm SHA-256 (kiểm tra toàn vẹn) và khóa AES + IV (mã hóa
+     * luồng dữ liệu). Gửi lại với cùng transferId/sha256/aesKey/aesIv là cách thực hiện truyền
+     * tiếp (resume) sau khi mạng gián đoạn: FileReceiver phía nhận sẽ tự khớp vào phần đã nhận dở.
+     */
+    public void sendFileRequest(String toUser, String transferId, String fileName, long fileSize,
+                                String sha256, String aesKeyBase64, String aesIvBase64) throws IOException {
         send(new Packet(Protocol.CMD_FILE_REQ)
                 .put("to", toUser)
                 .put("transferId", transferId)
                 .put("fileName", fileName)
-                .put("fileSize", fileSize));
+                .put("fileSize", fileSize)
+                .put(Protocol.FIELD_SHA256, sha256)
+                .put(Protocol.FIELD_AES_KEY, aesKeyBase64)
+                .put(Protocol.FIELD_AES_IV, aesIvBase64));
     }
 
     public void respondFile(String sender, String transferId, boolean accept) throws IOException {
