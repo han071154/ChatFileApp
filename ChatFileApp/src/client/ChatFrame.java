@@ -8,7 +8,9 @@
  */
 package client;
 
+import common.CryptoUtil;
 import common.FileInfo;
+import common.HashUtil;
 import common.Message;
 import common.Protocol;
 import java.awt.BorderLayout;
@@ -75,6 +77,7 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final JLabel progressLabel = new JLabel("Sẵn sàng");
     private final JButton cancelButton = new AccentButton("Hủy", false);
+    private final JButton resumeButton = new AccentButton("Thử lại", false);
     private final JLabel chatTitle = new JLabel("Chưa chọn cuộc trò chuyện");
     private final JLabel currentUserLabel = new JLabel("Chưa đăng nhập");
 
@@ -93,6 +96,7 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
     private JPanel chatRoot;                                       // chỉ dựng giao diện chat MỘT lần (tránh gắn trùng listener)
     private String activeTransferId; // phiên truyền file đang diễn ra (chỉ cho phép 1 phiên một lúc)
     private String activePeer;
+    private boolean transferResumable; // true nếu phiên GỬI hiện tại lỗi giữa chừng và còn có thể truyền tiếp
 
     // ---------- Giao diện: màu sắc, font, nút bo góc ----------
     private static final Color PRIMARY = new Color(0x2563EB);
@@ -363,9 +367,12 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         progressLabel.setPreferredSize(new Dimension(150, 22));
         cancelButton.setPreferredSize(new Dimension(64, 26));
         cancelButton.setVisible(false);
+        resumeButton.setPreferredSize(new Dimension(70, 26));
+        resumeButton.setVisible(false);
         JPanel progressEast = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
         progressEast.setOpaque(false);
         progressEast.add(progressLabel);
+        progressEast.add(resumeButton);
         progressEast.add(cancelButton);
 
         JPanel progressPanel = new JPanel(new BorderLayout(10, 0));
@@ -403,6 +410,7 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         sendButton.addActionListener(e -> sendMessage());
         fileButton.addActionListener(e -> chooseAndSendFile());
         cancelButton.addActionListener(e -> cancelTransfer());
+        resumeButton.addActionListener(e -> resumeSendingFile());
         messageField.addActionListener(e -> sendMessage());
 
         setTitle("Chat & Truyền file - " + client.getUsername());
@@ -607,32 +615,66 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         }
 
         String transferId = UUID.randomUUID().toString();
-        try {
-            rememberPendingFile(transferId, file);
-            beginTransfer(transferId, selectedUser);
-            client.sendFileRequest(selectedUser, transferId, file.getName(), file.length());
-            appendSystem("Đã gửi yêu cầu gửi file '" + file.getName() + "' tới " + selectedUser + ". Đang chờ đồng ý...");
-            progressBar.setValue(0);
-            progressLabel.setText("Chờ nhận file...");
-        } catch (IOException ex) {
-            pendingFiles.remove(transferId);
-            pendingInfos.remove(transferId);
-            endTransfer();
-            showError(ex.getMessage());
-        }
+        String receiver = selectedUser;
+        // Chiếm chỗ "đang bận" ngay để chặn thao tác khác trong lúc tính SHA-256 (có thể mất vài giây với file lớn).
+        beginTransfer(transferId, receiver);
+        progressBar.setValue(0);
+        progressLabel.setText("Đang chuẩn bị...");
+        appendSystem("Đang tính mã kiểm tra SHA-256 cho '" + file.getName() + "'...");
+
+        Thread prep = new Thread(() -> {
+            String sha256;
+            try {
+                sha256 = HashUtil.sha256Hex(file.toPath());
+            } catch (IOException ex) {
+                SwingUtilities.invokeLater(() -> {
+                    appendSystem("Lỗi đọc file: " + ex.getMessage());
+                    if (transferId.equals(activeTransferId)) endTransfer();
+                });
+                return;
+            }
+            byte[] aesKey = CryptoUtil.generateKeyBytes();
+            byte[] aesIv = CryptoUtil.generateIv();
+            SwingUtilities.invokeLater(() -> {
+                if (!transferId.equals(activeTransferId)) return; // người dùng đã hủy trong lúc tính toán
+                pendingFiles.put(transferId, file);
+                pendingInfos.put(transferId, new FileInfo(transferId, client.getUsername(), receiver, file.getName(), file.length()));
+                pendingCrypto.put(transferId, new TransferCrypto(aesKey, aesIv, sha256));
+                try {
+                    client.sendFileRequest(receiver, transferId, file.getName(), file.length(),
+                            sha256, CryptoUtil.encodeBase64(aesKey), CryptoUtil.encodeBase64(aesIv));
+                    appendSystem("Đã gửi yêu cầu gửi file '" + file.getName() + "' tới " + receiver + ". Đang chờ đồng ý...");
+                    progressLabel.setText("Chờ nhận file...");
+                } catch (IOException ex) {
+                    pendingFiles.remove(transferId);
+                    pendingInfos.remove(transferId);
+                    pendingCrypto.remove(transferId);
+                    endTransfer();
+                    showError(ex.getMessage());
+                }
+            });
+        }, "file-prep-" + transferId);
+        prep.setDaemon(true);
+        prep.start();
     }
 
     private void startSendingFile(String receiver, String transferId, String fileName, long fileSize) {
-        // FileSender cần File thật; yêu cầu file đã được chọn sẽ được lưu ở pendingFiles.
-        File file = pendingFiles.remove(transferId);
-        if (file == null) {
+        // FileSender cần File + khóa AES thật; được giữ lại ở pendingFiles/pendingCrypto cho tới khi
+        // phiên hoàn tất hay bị hủy hẳn (KHÔNG xóa ngay ở đây) để còn dùng lại nếu phải truyền tiếp.
+        File file = pendingFiles.get(transferId);
+        TransferCrypto crypto = pendingCrypto.get(transferId);
+        if (file == null || crypto == null) {
             appendSystem("Không tìm thấy file đang chờ gửi: " + fileName);
+            endTransfer();
             return;
         }
 
+        transferResumable = false;
+        resumeButton.setVisible(false);
         progressBar.setValue(0);
         progressLabel.setText("Đang gửi 0%");
         Thread t = new Thread(new FileSender(client.getHost(), Protocol.FILE_PORT, transferId, file,
+                crypto.aesKey(), crypto.aesIv(),
                 new FileSender.ProgressListener() {
                     @Override public void onProgress(int percent) {
                         SwingUtilities.invokeLater(() -> updateProgress(percent, "Đang gửi"));
@@ -640,15 +682,17 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
                     @Override public void onComplete() {
                         SwingUtilities.invokeLater(() -> {
                             updateProgress(100, "Gửi xong");
+                            pendingFiles.remove(transferId);
+                            pendingInfos.remove(transferId);
+                            pendingCrypto.remove(transferId);
                             endTransfer();
                             appendSystem("Đã gửi file '" + fileName + "' tới " + receiver + ".");
                         });
                     }
                     @Override public void onError(String message) {
                         SwingUtilities.invokeLater(() -> {
-                            updateProgress(0, "Lỗi");
                             appendSystem(message);
-                            endTransfer();
+                            pauseSendingForResume();
                         });
                     }
                 }), "file-sender-" + transferId);
@@ -656,7 +700,42 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         t.start();
     }
 
+    /** Phiên gửi lỗi giữa chừng: vẫn giữ file + khóa AES, hiện nút "Thử lại" để truyền tiếp (resume). */
+    private void pauseSendingForResume() {
+        transferResumable = true;
+        resumeButton.setVisible(true);
+        int percent = progressBar.getValue();
+        progressLabel.setText("Tạm dừng " + percent + "%");
+        appendSystem("Có thể bấm 'Thử lại' để truyền tiếp từ " + percent + "% thay vì gửi lại từ đầu.");
+        updateInputState();
+    }
+
+    /** Gửi lại FILE_REQ với CÙNG transferId/sha256/khóa AES để bên nhận ghép tiếp vào phần đã nhận dở. */
+    private void resumeSendingFile() {
+        if (!transferResumable || activeTransferId == null) return;
+        String transferId = activeTransferId;
+        File file = pendingFiles.get(transferId);
+        TransferCrypto crypto = pendingCrypto.get(transferId);
+        if (file == null || crypto == null) {
+            appendSystem("Không thể truyền tiếp: thông tin phiên truyền đã bị mất.");
+            endTransfer();
+            return;
+        }
+        transferResumable = false;
+        resumeButton.setVisible(false);
+        try {
+            client.sendFileRequest(activePeer, transferId, file.getName(), file.length(),
+                    crypto.sha256(), CryptoUtil.encodeBase64(crypto.aesKey()), CryptoUtil.encodeBase64(crypto.aesIv()));
+            appendSystem("Đang thử truyền tiếp file '" + file.getName() + "'...");
+        } catch (IOException ex) {
+            showError(ex.getMessage());
+            pauseSendingForResume();
+        }
+    }
+
     private final java.util.Map<String, File> pendingFiles = new java.util.concurrent.ConcurrentHashMap<>();
+    // Khóa AES + IV + SHA-256 của phiên gửi hiện tại, giữ tới khi xong/hủy hẳn để phục vụ truyền tiếp.
+    private final java.util.Map<String, TransferCrypto> pendingCrypto = new java.util.concurrent.ConcurrentHashMap<>();
 
     @Override
     public void onConnected(String username) {
@@ -685,6 +764,8 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         groupToOpen = null;
         pendingFiles.clear();
         pendingInfos.clear();
+        pendingCrypto.clear();
+        incomingSaveDirs.clear();
         endTransfer();
         updateProgress(0, "Sẵn sàng");
         setCursor(java.awt.Cursor.getDefaultCursor());
@@ -747,6 +828,44 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         String fileName = packet.get("fileName") == null ? "" : new File(packet.get("fileName")).getName();
         if (fileName.isEmpty()) fileName = "file_nhan_duoc";
         long fileSize = packet.getLong("fileSize", 0);
+        String sha256 = packet.get(Protocol.FIELD_SHA256);
+        String aesKeyB64 = packet.get(Protocol.FIELD_AES_KEY);
+        String aesIvB64 = packet.get(Protocol.FIELD_AES_IV);
+        if (aesKeyB64 == null || aesIvB64 == null) {
+            try {
+                client.respondFile(from, transferId, false);
+            } catch (IOException ignored) {
+            }
+            appendSystem("Đã từ chối file '" + fileName + "' từ " + from + ": thiếu thông tin mã hóa.");
+            return;
+        }
+        byte[] aesKey = CryptoUtil.decodeBase64(aesKeyB64);
+        byte[] aesIv = CryptoUtil.decodeBase64(aesIvB64);
+
+        // Phiên này đã từng được chấp nhận và bị ngắt giữa chừng (còn tệp tạm) -> bên gửi đang truyền
+        // tiếp (resume): tự động nhận lại đúng thư mục cũ, không hỏi lại người dùng.
+        File resumeDir = incomingSaveDirs.get(transferId);
+        if (resumeDir != null) {
+            if (activeTransferId != null && !activeTransferId.equals(transferId)) {
+                // đang bận phiên khác -> từ chối lượt này nhưng VẪN giữ tệp tạm để truyền tiếp lần sau
+                try {
+                    client.respondFile(from, transferId, false);
+                } catch (IOException ignored) {
+                }
+                appendSystem("Đang bận phiên khác, chưa thể tiếp tục nhận file '" + fileName + "' từ " + from + ".");
+                return;
+            }
+            try {
+                beginTransfer(transferId, from);
+                client.respondFile(from, transferId, true);
+                appendSystem("Tiếp tục nhận file '" + fileName + "' từ " + from + " (truyền tiếp)...");
+                startReceivingFile(from, transferId, fileName, fileSize, resumeDir, aesKey, aesIv, sha256);
+            } catch (IOException ex) {
+                endTransfer();
+                showError("Không gửi được phản hồi file: " + ex.getMessage());
+            }
+            return;
+        }
 
         try {
             if (activeTransferId != null) { // đang bận phiên khác -> tự từ chối
@@ -776,35 +895,40 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
             }
             File saveDir = chooser.getSelectedFile();
 
+            incomingSaveDirs.put(transferId, saveDir);
             beginTransfer(transferId, from);
             client.respondFile(from, transferId, true);
-            startReceivingFile(from, transferId, fileName, fileSize, saveDir);
+            startReceivingFile(from, transferId, fileName, fileSize, saveDir, aesKey, aesIv, sha256);
         } catch (IOException ex) {
             endTransfer();
             showError("Không gửi được phản hồi file: " + ex.getMessage());
         }
     }
 
-    private void startReceivingFile(String sender, String transferId, String fileName, long fileSize, File saveDir) {
+    private void startReceivingFile(String sender, String transferId, String fileName, long fileSize, File saveDir,
+                                    byte[] aesKey, byte[] aesIv, String sha256) {
         progressBar.setValue(0);
         progressLabel.setText("Đang nhận 0%");
         appendSystem("Đang nhận file '" + fileName + "' từ " + sender + "...");
 
         Thread t = new Thread(new FileReceiver(client.getHost(), Protocol.FILE_PORT, transferId, fileName, fileSize,
-                saveDir, new FileReceiver.ProgressListener() {
+                saveDir, aesKey, aesIv, sha256, new FileReceiver.ProgressListener() {
                     @Override public void onProgress(int percent) {
                         SwingUtilities.invokeLater(() -> updateProgress(percent, "Đang nhận"));
                     }
                     @Override public void onComplete() {
                         SwingUtilities.invokeLater(() -> {
                             updateProgress(100, "Nhận xong");
+                            incomingSaveDirs.remove(transferId);
                             endTransfer();
-                            appendSystem("Đã nhận file '" + fileName + "' vào " + saveDir.getAbsolutePath());
+                            appendSystem("Đã nhận file '" + fileName + "' vào " + saveDir.getAbsolutePath()
+                                    + " (đã xác minh SHA-256).");
                         });
                     }
                     @Override public void onError(String message) {
+                        // Không xóa incomingSaveDirs ở đây: nếu là lỗi mất kết nối, tệp tạm vẫn còn trên đĩa
+                        // và lần FILE_REQ kế tiếp với cùng transferId sẽ tự nhận tiếp (xem phía trên).
                         SwingUtilities.invokeLater(() -> {
-                            updateProgress(0, "Lỗi");
                             appendSystem(message);
                             endTransfer();
                         });
@@ -822,13 +946,14 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
 
         if (Protocol.STATUS_ACCEPT.equals(status)) {
             appendSystem(receiver + " đã đồng ý nhận file.");
-            FileInfo info = pendingInfos.remove(transferId);
+            FileInfo info = pendingInfos.get(transferId);
             if (info != null) {
                 startSendingFile(receiver, transferId, info.getFileName(), info.getFileSize());
             }
         } else {
             pendingFiles.remove(transferId);
             pendingInfos.remove(transferId);
+            pendingCrypto.remove(transferId);
             appendSystem(receiver + " đã từ chối nhận file.");
             updateProgress(0, "Bị từ chối");
             if (transferId.equals(activeTransferId)) endTransfer();
@@ -837,14 +962,25 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
 
     // Thông tin (tên, dung lượng) của file đang chờ người nhận đồng ý
     private final java.util.Map<String, FileInfo> pendingInfos = new java.util.concurrent.ConcurrentHashMap<>();
+    // Thư mục lưu đã chọn cho mỗi phiên NHẬN còn có thể truyền tiếp (tệp tạm <transferId>.part vẫn còn trong đó)
+    private final java.util.Map<String, File> incomingSaveDirs = new java.util.concurrent.ConcurrentHashMap<>();
 
-    /** Đối phương hủy phiên truyền (server chuyển tiếp FILE_CANCEL). */
+    /** Đối phương hủy phiên truyền (server chuyển tiếp FILE_CANCEL): hủy hẳn, không giữ lại để truyền tiếp. */
     private void handleFileCancelled(Packet packet) {
         String id = packet.get("transferId");
         appendSystem(packet.get("from") + " đã hủy phiên truyền file.");
-        if (id != null && id.equals(activeTransferId)) {
+        if (id != null) {
             pendingFiles.remove(id);
             pendingInfos.remove(id);
+            pendingCrypto.remove(id);
+            File saveDir = incomingSaveDirs.remove(id);
+            if (saveDir != null) {
+                new File(saveDir, id + ".part").delete(); // hủy hẳn thì xóa luôn phần dữ liệu nhận dở
+            }
+        }
+        if (id != null && id.equals(activeTransferId)) {
+            transferResumable = false;
+            resumeButton.setVisible(false);
             updateProgress(0, "Đã bị hủy");
             endTransfer();
         }
@@ -860,11 +996,13 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
     private void endTransfer() {
         activeTransferId = null;
         activePeer = null;
+        transferResumable = false;
+        resumeButton.setVisible(false);
         cancelButton.setVisible(false);
         updateInputState();
     }
 
-    /** Người dùng bấm Hủy: báo server đóng kênh 5001 và báo cho đối phương. */
+    /** Người dùng bấm Hủy: báo server đóng kênh 5001 và báo cho đối phương. Hủy hẳn, không giữ để truyền tiếp. */
     private void cancelTransfer() {
         if (activeTransferId == null) return;
         try {
@@ -873,6 +1011,11 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         }
         pendingFiles.remove(activeTransferId);
         pendingInfos.remove(activeTransferId);
+        pendingCrypto.remove(activeTransferId);
+        File saveDir = incomingSaveDirs.remove(activeTransferId);
+        if (saveDir != null) {
+            new File(saveDir, activeTransferId + ".part").delete();
+        }
         appendSystem("Bạn đã hủy phiên truyền file.");
         updateProgress(0, "Đã hủy");
         endTransfer();
@@ -1044,12 +1187,5 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
         if (bytes < 1024L * 1024L * 1024L) return String.format("%.1f MB", bytes / 1024.0 / 1024.0);
         return String.format("%.2f GB", bytes / 1024.0 / 1024.0 / 1024.0);
-    }
-
-    // Ghi nhớ file đã chọn cho tới khi người nhận ACCEPT.
-    private void rememberPendingFile(String transferId, File file) {
-        pendingFiles.put(transferId, file);
-        pendingInfos.put(transferId, new FileInfo(transferId, client.getUsername(), selectedUser,
-                file.getName(), file.length()));
     }
 }

@@ -34,6 +34,13 @@ public class Protocol {
     public static final String ROLE_SENDER = "SENDER";
     public static final String ROLE_RECEIVER = "RECEIVER";
 
+    // Trường bổ sung trong FILE_REQ: kiểm tra toàn vẹn (SHA-256) và khóa mã hóa đối xứng AES
+    // cho luồng dữ liệu file (xem common.CryptoUtil, common.HashUtil). Gửi lại FILE_REQ với
+    // cùng transferId + cùng các trường này là cách client thực hiện truyền tiếp (resume).
+    public static final String FIELD_SHA256 = "sha256";
+    public static final String FIELD_AES_KEY = "aesKey";
+    public static final String FIELD_AES_IV = "aesIv";
+
     // Helper tạo lệnh nhanh
     public static String createMsg(String toUser, String content) {
         return CMD_MSG + SEP + toUser + SEP + content;
