@@ -180,6 +180,34 @@ public class ChatClient {
                 .put("transferId", transferId));
     }
 
+    // ---- Kho file nhóm: tải lên server một lần, thành viên nào cần thì tự tải về ----
+
+    /** Xin tải file lên nhóm; gửi lại cùng transferId/sha256/khóa AES để tải lên tiếp phần còn thiếu. */
+    public void uploadGroupFile(String group, String transferId, String fileName, long fileSize,
+                                String sha256, String aesKeyBase64, String aesIvBase64) throws IOException {
+        send(new Packet(ServerCommands.GROUP_FILE_UPLOAD)
+                .put("group", group)
+                .put("transferId", transferId)
+                .put("fileName", fileName)
+                .put("fileSize", fileSize)
+                .put(Protocol.FIELD_SHA256, sha256)
+                .put(Protocol.FIELD_AES_KEY, aesKeyBase64)
+                .put(Protocol.FIELD_AES_IV, aesIvBase64));
+    }
+
+    /** Xin tải về một file của nhóm; server trả GROUP_FILE_DOWNLOAD_OK kèm khóa AES + SHA-256. */
+    public void downloadGroupFile(String group, String fileId, String transferId) throws IOException {
+        send(new Packet(ServerCommands.GROUP_FILE_DOWNLOAD)
+                .put("group", group)
+                .put("fileId", fileId)
+                .put("transferId", transferId));
+    }
+
+    /** Hủy phiên tải lên/tải về kho file nhóm (FILE_CANCEL không có "to"). */
+    public void cancelGroupTransfer(String transferId) throws IOException {
+        send(new Packet(ServerCommands.FILE_CANCEL).put("transferId", transferId));
+    }
+
     public void logout() {
         if (connected.get()) {
             try {

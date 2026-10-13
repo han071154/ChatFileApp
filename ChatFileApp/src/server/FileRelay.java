@@ -42,6 +42,7 @@ import java.util.concurrent.TimeUnit;
  *  5. Hủy: một bên đóng socket, hoặc gửi FILE_CANCEL trên kênh chat -> relay đóng cả hai socket.
  *
  * Bên chờ ghép cặp KHÔNG giữ luồng: socket được cất vào bảng chờ và luồng trả về Thread Pool.
+ * Kết nối của kho file nhóm (tải lên / tải về, xem GroupFileStore) cũng đi qua cổng này.
  */
 public class FileRelay {
     public static final int MAX_CONCURRENT_TRANSFERS = 10;
@@ -63,6 +64,7 @@ public class FileRelay {
                     return size() > MAX_HISTORY;
                 }
             });
+    private final GroupFileStore groupFiles;
     private volatile boolean running = true;
     private volatile ServerSocket serverSocket;
 
@@ -72,6 +74,11 @@ public class FileRelay {
         this.pool = new ThreadPoolExecutor(0, MAX_CONCURRENT_TRANSFERS * 2, 60, TimeUnit.SECONDS,
                 new SynchronousQueue<>(), ChatServer.namedThreadFactory("file"));
         this.cleaner = Executors.newSingleThreadScheduledExecutor(ChatServer.namedThreadFactory("file-cleaner"));
+        this.groupFiles = new GroupFileStore(this, cleaner);
+    }
+
+    public GroupFileStore getGroupFiles() {
+        return groupFiles;
     }
 
     public void start() {
@@ -114,6 +121,7 @@ public class FileRelay {
             t.close();
         }
         transfers.clear();
+        groupFiles.stop();
         for (TransferStatus s : getTransferStatuses()) {
             s.finish("Server dừng");
         }
@@ -135,6 +143,13 @@ public class FileRelay {
     public void noteRequest(String transferId, String sender, String receiver, String fileName, long fileSize) {
         // putIfAbsent: không cho một FILE_REQ khác ghi đè phiên đã có cùng id
         statuses.putIfAbsent(transferId, new TransferStatus(transferId, sender, receiver, fileName, fileSize));
+    }
+
+    /** Lấy (hoặc tạo) dòng trạng thái cho phiên của kho file nhóm; dùng lại dòng cũ khi truyền tiếp. */
+    TransferStatus track(String transferId, String sender, String receiver, String fileName, long fileSize) {
+        return statuses.compute(transferId, (id, s) ->
+                s != null && s.sender.equals(sender) && s.receiver.equals(receiver)
+                        ? s : new TransferStatus(id, sender, receiver, fileName, fileSize));
     }
 
     /** Người nhận từ chối (FILE_RESP REJECT). */
@@ -197,6 +212,10 @@ public class FileRelay {
             String transferId = init.get("transferId");
             String role = init.get("role");
             transfer = transferId == null ? null : transfers.get(transferId);
+            if (transfer == null && Protocol.CMD_FILE_INIT.equals(init.getType()) && groupFiles.handles(transferId)) {
+                groupFiles.handleConnection(socket, in, out, init);
+                return;
+            }
 
             String reason = null;
             if (!Protocol.CMD_FILE_INIT.equals(init.getType())) {

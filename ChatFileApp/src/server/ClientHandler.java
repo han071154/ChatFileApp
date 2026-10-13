@@ -146,6 +146,12 @@ public class ClientHandler implements Runnable {
             case ServerCommands.GROUP_MSG:
                 handleGroupMessage(packet);
                 break;
+            case ServerCommands.GROUP_FILE_UPLOAD:
+                handleGroupFileUpload(packet);
+                break;
+            case ServerCommands.GROUP_FILE_DOWNLOAD:
+                handleGroupFileDownload(packet);
+                break;
             case Protocol.CMD_FILE_REQ:
             case Protocol.CMD_FILE_RESP:
             case ServerCommands.FILE_CANCEL:
@@ -184,6 +190,10 @@ public class ClientHandler implements Runnable {
         } else if (ServerCommands.GROUP_JOIN.equals(type)) {
             if (server.joinGroup(group, username)) {
                 ServerLogger.info("'" + username + "' vào nhóm '" + group + "'");
+                // Người mới vào thấy được các file nhóm đã chia sẻ trước đó
+                for (GroupFileStore.GroupFile f : server.getFileRelay().getGroupFiles().listFiles(group)) {
+                    send(GroupFileStore.fileAnnouncement(f));
+                }
             } else {
                 send(error("Nhóm '" + group + "' không tồn tại"));
             }
@@ -216,6 +226,66 @@ public class ClientHandler implements Runnable {
                 .put("content", content));
     }
 
+    // GROUP_FILE_UPLOAD {group, transferId, fileName, fileSize, sha256, aesKey, aesIv}
+    //   -> GROUP_FILE_UPLOAD_OK {group, transferId}, rồi client tải lên qua cổng 5001 với role SENDER
+    private void handleGroupFileUpload(Packet packet) {
+        String group = packet.get("group");
+        String transferId = packet.get("transferId");
+        String fileName = packet.get("fileName") == null ? "" : packet.get("fileName").trim();
+        String reason = null;
+        if (transferId == null || transferId.isEmpty()) {
+            reason = "Thiếu transferId";
+        } else if (group == null || !server.isGroupMember(group, username)) {
+            reason = "Bạn không ở trong nhóm '" + group + "'";
+        } else if (fileName.isEmpty()) {
+            reason = "Thiếu tên file";
+        } else {
+            reason = server.getFileRelay().getGroupFiles().authorizeUpload(transferId, username, getRemoteAddress(),
+                    group, fileName, packet.getLong("fileSize", -1), packet.get(Protocol.FIELD_SHA256),
+                    packet.get(Protocol.FIELD_AES_KEY), packet.get(Protocol.FIELD_AES_IV));
+        }
+        if (reason != null) {
+            send(error(reason).put("transferId", transferId));
+            return;
+        }
+        ServerLogger.info("'" + username + "' tải file '" + fileName + "' (" + packet.get("fileSize")
+                + " bytes) lên nhóm '" + group + "' [" + transferId + "]");
+        send(new Packet(ServerCommands.GROUP_FILE_UPLOAD_OK).put("group", group).put("transferId", transferId));
+    }
+
+    // GROUP_FILE_DOWNLOAD {group, fileId, transferId}
+    //   -> GROUP_FILE_DOWNLOAD_OK {..., sha256, aesKey, aesIv}, rồi client tải về qua cổng 5001 với role RECEIVER
+    private void handleGroupFileDownload(Packet packet) {
+        String group = packet.get("group");
+        String fileId = packet.get("fileId");
+        String transferId = packet.get("transferId");
+        if (transferId == null || transferId.isEmpty()) {
+            send(error("Thiếu transferId"));
+            return;
+        }
+        if (group == null || !server.isGroupMember(group, username)) {
+            send(error("Bạn không ở trong nhóm '" + group + "'").put("transferId", transferId));
+            return;
+        }
+        GroupFileStore.GroupFile f = server.getFileRelay().getGroupFiles()
+                .authorizeDownload(transferId, username, getRemoteAddress(), group, fileId);
+        if (f == null) {
+            send(error("File không còn trên server hoặc phiên tải về không hợp lệ").put("transferId", transferId));
+            return;
+        }
+        ServerLogger.info("'" + username + "' tải về file '" + f.fileName + "' của nhóm '" + group
+                + "' [" + transferId + "]");
+        send(new Packet(ServerCommands.GROUP_FILE_DOWNLOAD_OK)
+                .put("group", group)
+                .put("fileId", f.id)
+                .put("transferId", transferId)
+                .put("fileName", f.fileName)
+                .put("fileSize", f.fileSize)
+                .put(Protocol.FIELD_SHA256, f.sha256)
+                .put(Protocol.FIELD_AES_KEY, f.aesKey)
+                .put(Protocol.FIELD_AES_IV, f.aesIv));
+    }
+
     /**
      * FILE_REQ / FILE_RESP / FILE_CANCEL: server chỉ chuyển tiếp nguyên gói tin (giữ mọi trường như
      * fileName, fileSize, sha256, offset...) và đổi "to" thành "from".
@@ -229,6 +299,14 @@ public class ClientHandler implements Runnable {
         }
         String type = packet.getType();
         String otherUser = packet.get("to");
+
+        // FILE_CANCEL {transferId} không có "to": hủy phiên tải lên/tải về kho file nhóm
+        if (ServerCommands.FILE_CANCEL.equals(type) && otherUser == null) {
+            if (server.getFileRelay().getGroupFiles().cancel(transferId, username)) {
+                ServerLogger.info("'" + username + "' hủy tải file nhóm [" + transferId + "]");
+            }
+            return;
+        }
 
         if (Protocol.CMD_FILE_REQ.equals(type)) {
             ServerLogger.info("'" + username + "' yêu cầu gửi file '" + packet.get("fileName") + "' ("
