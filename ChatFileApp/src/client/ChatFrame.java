@@ -6,6 +6,14 @@
  * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
  * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
  */
+/*
+ * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
+ * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
+ */
+/*
+ * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
+ * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
+ */
 package client;
 
 import common.CryptoUtil;
@@ -44,6 +52,7 @@ import javax.swing.JLabel;
 import javax.swing.JList;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JPasswordField;
 import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
@@ -83,6 +92,7 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
 
     private JTextField hostField;
     private JTextField usernameField;
+    private JPasswordField keyField;
     private JButton loginButton;
 
     private ChatClient client;
@@ -249,6 +259,18 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         c.insets = new Insets(8, 0, 8, 0);
         card.add(usernameField, c);
 
+        c.gridy++; c.gridx = 0; c.weightx = 0;
+        c.insets = new Insets(8, 0, 8, 16);
+        JLabel keyLabel = new JLabel("Khóa mã hóa:");
+        keyLabel.setFont(ui(Font.PLAIN, 14));
+        card.add(keyLabel, c);
+        keyField = new JPasswordField();
+        styleField(keyField);
+        keyField.setToolTipText("Mật khẩu chung dùng để mã hóa AES tin nhắn. Các máy phải nhập giống nhau mới đọc được tin của nhau. Để trống = dùng khóa mặc định.");
+        c.gridx = 1; c.weightx = 1;
+        c.insets = new Insets(8, 0, 8, 0);
+        card.add(keyField, c);
+
         c.gridx = 0; c.gridy++; c.gridwidth = 2; c.weightx = 1;
         c.insets = new Insets(18, 0, 8, 0);
         loginButton = new AccentButton("Đăng nhập", true);
@@ -269,6 +291,7 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
 
         loginButton.addActionListener(e -> loginAsync());
         usernameField.addActionListener(e -> loginAsync());
+        keyField.addActionListener(e -> loginAsync());
 
         setContentPane(root);
         revalidate();
@@ -287,6 +310,7 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         loginButton.setEnabled(false);
         setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.WAIT_CURSOR));
         client = new ChatClient(host, Protocol.CHAT_PORT, this);
+        client.setMessageKey(new String(keyField.getPassword()));
 
         Thread loginThread = new Thread(() -> {
             try {
@@ -815,11 +839,11 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
             case Protocol.CMD_USER_LIST -> updateOnlineUsers(packet.get("users"));
             case ServerCommands.USER_JOINED -> appendSystem(packet.get("username") + " đã online.");
             case ServerCommands.USER_LEFT -> appendSystem(packet.get("username") + " đã offline.");
-            case Protocol.CMD_MSG -> appendChat(new Message(packet.get("from"), client.getUsername(), packet.get("content")));
+            case Protocol.CMD_MSG -> appendChat(new Message(packet.get("from"), client.getUsername(), client.decryptContent(packet.get("content"))));
             case ServerCommands.FILE_CANCEL -> handleFileCancelled(packet);
             case ServerCommands.GROUP_LIST -> updateGroupList(packet.get("groups"));
             case ServerCommands.GROUP_UPDATE -> handleGroupUpdate(packet);
-            case ServerCommands.GROUP_MSG -> appendChat(new Message(packet.get("from"), "g:" + packet.get("group"), packet.get("content")));
+            case ServerCommands.GROUP_MSG -> appendChat(new Message(packet.get("from"), "g:" + packet.get("group"), client.decryptContent(packet.get("content"))));
             case ServerCommands.GROUP_FILE -> handleGroupFile(packet);
             case ServerCommands.GROUP_FILE_UPLOAD_OK -> handleGroupUploadOk(packet);
             case ServerCommands.GROUP_FILE_DOWNLOAD_OK -> handleGroupDownloadOk(packet);

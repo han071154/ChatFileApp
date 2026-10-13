@@ -2,8 +2,13 @@
  * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
  * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
  */
+/*
+ * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
+ * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
+ */
 package client;
 
+import common.CryptoUtil;
 import common.Protocol;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -13,6 +18,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.security.GeneralSecurityException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.swing.SwingUtilities;
 import server.Packet;
@@ -39,11 +45,46 @@ public class ChatClient {
     private DataOutputStream out;
     private volatile String username;
     private final AtomicBoolean connected = new AtomicBoolean(false);
+    private volatile byte[] messageKey; // khóa AES-256 để mã hóa/giải mã tin nhắn chat
 
     public ChatClient(String host, int port, Listener listener) {
         this.host = host;
         this.port = port;
         this.listener = listener;
+    }
+
+    /** Đặt "Khóa mã hóa" cho tin nhắn: các client phải cùng mật khẩu mới đọc được tin của nhau. Để trống = mật khẩu mặc định. */
+    public void setMessageKey(String passphrase) {
+        this.messageKey = CryptoUtil.deriveKey(passphrase);
+    }
+
+    private byte[] messageKey() {
+        byte[] k = messageKey;
+        if (k == null) {
+            setMessageKey(null);
+            k = messageKey;
+        }
+        return k;
+    }
+
+    private String encryptContent(String content) throws IOException {
+        try {
+            return CryptoUtil.encryptText(messageKey(), content);
+        } catch (GeneralSecurityException e) {
+            throw new IOException("Không mã hóa được tin nhắn: " + e.getMessage(), e);
+        }
+    }
+
+    /** Giải mã nội dung chat nhận được; tin không mã hóa được trả nguyên văn, sai khóa thì báo rõ thay vì hiện chuỗi rối. */
+    public String decryptContent(String content) {
+        if (!CryptoUtil.isEncrypted(content)) {
+            return content;
+        }
+        try {
+            return CryptoUtil.decryptText(messageKey(), content);
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
+            return "[Không giải mã được - sai khóa mã hóa]";
+        }
     }
 
     /** Kết nối + đăng nhập. Hàm này phải được gọi từ Thread/SwingWorker, không gọi trực tiếp trên EDT. */
@@ -126,7 +167,7 @@ public class ChatClient {
         }
         send(new Packet(Protocol.CMD_MSG)
                 .put("to", toUser)
-                .put("content", content));
+                .put("content", encryptContent(content)));
     }
 
     // ---- Chat nhóm (server đã hỗ trợ): người tạo nhóm tự động là thành viên ----
@@ -147,7 +188,7 @@ public class ChatClient {
         if (content == null || content.trim().isEmpty()) {
             return;
         }
-        send(new Packet(ServerCommands.GROUP_MSG).put("group", group).put("content", content));
+        send(new Packet(ServerCommands.GROUP_MSG).put("group", group).put("content", encryptContent(content)));
     }
 
     /**
