@@ -6,14 +6,6 @@
  * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
  * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
  */
-/*
- * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
- * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
- */
-/*
- * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
- * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
- */
 package client;
 
 import common.CryptoUtil;
@@ -52,7 +44,6 @@ import javax.swing.JLabel;
 import javax.swing.JList;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
-import javax.swing.JPasswordField;
 import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JSplitPane;
@@ -92,7 +83,6 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
 
     private JTextField hostField;
     private JTextField usernameField;
-    private JPasswordField keyField;
     private JButton loginButton;
 
     private ChatClient client;
@@ -259,18 +249,6 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         c.insets = new Insets(8, 0, 8, 0);
         card.add(usernameField, c);
 
-        c.gridy++; c.gridx = 0; c.weightx = 0;
-        c.insets = new Insets(8, 0, 8, 16);
-        JLabel keyLabel = new JLabel("Khóa mã hóa:");
-        keyLabel.setFont(ui(Font.PLAIN, 14));
-        card.add(keyLabel, c);
-        keyField = new JPasswordField();
-        styleField(keyField);
-        keyField.setToolTipText("Mật khẩu chung dùng để mã hóa AES tin nhắn. Các máy phải nhập giống nhau mới đọc được tin của nhau. Để trống = dùng khóa mặc định.");
-        c.gridx = 1; c.weightx = 1;
-        c.insets = new Insets(8, 0, 8, 0);
-        card.add(keyField, c);
-
         c.gridx = 0; c.gridy++; c.gridwidth = 2; c.weightx = 1;
         c.insets = new Insets(18, 0, 8, 0);
         loginButton = new AccentButton("Đăng nhập", true);
@@ -291,7 +269,6 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
 
         loginButton.addActionListener(e -> loginAsync());
         usernameField.addActionListener(e -> loginAsync());
-        keyField.addActionListener(e -> loginAsync());
 
         setContentPane(root);
         revalidate();
@@ -310,7 +287,6 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
         loginButton.setEnabled(false);
         setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.WAIT_CURSOR));
         client = new ChatClient(host, Protocol.CHAT_PORT, this);
-        client.setMessageKey(new String(keyField.getPassword()));
 
         Thread loginThread = new Thread(() -> {
             try {
@@ -931,10 +907,12 @@ public class ChatFrame extends JFrame implements ChatClient.Listener {
                 return;
             }
 
-            int answer = JOptionPane.showConfirmDialog(this,
+            Object[] choices = {"Nhận file", "Từ chối"};
+            int answer = JOptionPane.showOptionDialog(this,
                     "Người dùng '" + from + "' muốn gửi file:\n\n" + fileName
                             + "\nDung lượng: " + formatBytes(fileSize) + "\n\nBạn có nhận không?",
-                    "Yêu cầu nhận file", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
+                    "Yêu cầu nhận file", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE,
+                    null, choices, choices[0]);
             if (answer != JOptionPane.YES_OPTION) {
                 client.respondFile(from, transferId, false);
                 appendSystem("Đã từ chối file '" + fileName + "' từ " + from + ".");
