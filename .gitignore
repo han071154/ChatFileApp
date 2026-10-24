@@ -1,16 +1,10 @@
-# Compiled class file
+# ===== Java =====
 *.class
-
-# Log file
 *.log
-
-# BlueJ files
 *.ctxt
-
-# Mobile Tools for Java (J2ME)
 .mtj.tmp/
 
-# Package Files #
+# Package files
 *.jar
 *.war
 *.nar
@@ -19,9 +13,26 @@
 *.tar.gz
 *.rar
 
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+# JVM crash logs
 hs_err_pid*
 replay_pid*
 
-# File nhóm do server lưu tạm khi chạy
+# ===== NetBeans =====
+build/
+dist/
+**/nbproject/private/
+nbbuild/
+nbdist/
+
+# ===== IDE khác =====
+.idea/
+.vscode/
+*.iml
+
+# ===== Hệ điều hành =====
+.DS_Store
+Thumbs.db
+
+# ===== File do server tạo khi chạy =====
 group_files/
+server.log
