@@ -20,7 +20,7 @@
 
 | MSSV | Họ và Tên | Công việc đã thực hiện | Merge Requests |
 |---|---|---|---|
-| 2380600607 | Phạm Ngọc Hân | Client và giao diện Swing (ChatFrame, ChatClient), mã hóa AES cho tin nhắn, dọn repo, viết lại README | Commit trực tiếp trước khi áp dụng quy trình PR: 6e4cf05, fde2f12, 311512c. Sau đó: #(số PR dọn repo), #(số PR README) |
+| 2380600607 | Phạm Ngọc Hân | Client và giao diện Swing (ChatFrame, ChatClient), mã hóa AES cho tin nhắn, dọn repo, viết lại README | Commit trực tiếp trước khi áp dụng quy trình PR: 6e4cf05, fde2f12, 311512c. Sau đó: #5, #7 |
 | 2380600077 | Tăng Nguyễn Kiều Anh | Giao thức (Protocol), FileSender / FileReceiver, AES, SHA-256, truyền tiếp, README bản đầu tiên | #3 |
 | 2380602066 | Nguyễn Thị Thảo | Server (ChatServer, ClientHandler, FileRelay, ServerLogger), ServerFrame, gửi tệp trong nhóm | #1, #2, #4 |
 
