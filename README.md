@@ -1,108 +1,104 @@
-# \# ỨNG DỤNG CHAT \& TRUYỀN TỆP TIN 1-1 (JAVA SOCKET)
+# Ứng dụng Chat & Truyền tệp tin 1-1 (Java Socket)
 
-# 
+Đồ án môn **Lập trình Mạng máy tính** – Nhóm 2, lớp 23DTHD1.
 
-# Đồ án môn học: Lập trình Mạng máy tính  
+- **Kiến trúc:** Client – Server (TCP Socket, mỗi client một luồng trong thread pool)
+- **Ngôn ngữ và công cụ:** Java (JDK 22), Java Swing, Apache NetBeans 22, Git/GitHub
 
-# Kiến trúc: Client - Server (Multi-threaded TCP Sockets)  
+## 1. Chức năng
 
-# Ngôn ngữ \& Công cụ: Java (JDK 17), Java Swing, Apache NetBeans
+- Đăng nhập bằng tên, danh sách người dùng online cập nhật theo thời gian thực.
+- Chat 1-1 và chat nhóm (tạo nhóm, vào nhóm, rời nhóm).
+- Gửi tệp 1-1: người nhận chọn **Nhận / Từ chối**, có thanh tiến trình, hủy giữa chừng, tự đổi tên khi trùng (`ten (1).ext`).
+- Gửi tệp trong nhóm: tải lên server, thành viên bấm **Tải về** khi cần.
+- **Truyền tiếp (resume)** khi đứt kết nối: bên nhận giữ tệp tạm `.part` và báo số byte đã có, bên gửi gửi tiếp từ đó.
+- **Mã hóa AES-256:** tin nhắn dùng AES/GCM (khóa dẫn xuất bằng PBKDF2), luồng tệp dùng AES/CTR.
+- **Kiểm tra toàn vẹn SHA-256** sau khi nhận tệp.
+- Server có giao diện quản lý (`ServerFrame`): danh sách user, nhóm, phiên truyền tệp, nhật ký; ghi log ra `server.log`.
 
-# 
+## 2. Thành viên và bảng đóng góp
 
-# \---
+| MSSV | Họ và Tên | Công việc đã thực hiện | Merge Requests |
+|---|---|---|---|
+| 2380600607 | Phạm Ngọc Hân | Client và giao diện Swing (ChatFrame, ChatClient), mã hóa AES cho tin nhắn, dọn repo, viết lại README | Commit trực tiếp trước khi áp dụng quy trình PR: 6e4cf05, fde2f12, 311512c. Sau đó: #(số PR dọn repo), #(số PR README) |
+| 2380600077 | Tăng Nguyễn Kiều Anh | Giao thức (Protocol), FileSender / FileReceiver, AES, SHA-256, truyền tiếp, README bản đầu tiên | #3 |
+| 2380602066 | Nguyễn Thị Thảo | Server (ChatServer, ClientHandler, FileRelay, ServerLogger), ServerFrame, gửi tệp trong nhóm | #1, #2, #4 |
 
-# 
+## 3. Kiến trúc và giao thức
 
-# \## 1. Thành viên nhóm \& Phân công nhiệm vụ
+Hệ thống dùng **hai kênh TCP độc lập** để truyền tệp lớn không làm nghẽn tin nhắn:
 
-# 
+- **Cổng 5000 – kênh chat và điều khiển** (`ChatServer`).
+- **Cổng 5001 – kênh dữ liệu tệp** (`FileRelay`): server ghép người gửi và người nhận theo `transferId` rồi chuyển tiếp từng khối 64 KB.
 
-# | Thành viên | Trách nhiệm chính | Mô tả công việc chi tiết |
+### Khung gói tin
 
-# | :--- | :--- | :--- |
+Mỗi gói tin gồm **4 byte độ dài (int)** theo sau là **nội dung JSON (UTF-8)**, tối đa 1 MB. Bên nhận đọc 4 byte rồi dùng `readFully` để đọc đủ số byte đó, nên không bị vỡ hoặc dính gói khi mạng chia nhỏ dữ liệu.
 
-# | \*\*Thảo\*\* | \*\*Server Core\*\* | - Xây dựng `ChatServer`: mở `ServerSocket`, xử lý đa luồng kết nối client (`ClientHandler`).<br>- Quản lý danh sách người dùng online (`ConcurrentHashMap`).<br>- Định tuyến tin nhắn chat 1-1, thông báo trạng thái user đăng nhập/thoát.<br>- Xây dựng `FileRelay` trên port 5001: ghép cặp người gửi/nhận qua `transferId` và ghi log hệ thống. |
+```json
+{ "type": "MSG", "to": "han", "content": "ENC1:..." }
+```
 
-# | \*\*Hân\*\* | \*\*Client \& GUI\*\* | - Thiết kế giao diện Java Swing (`ChatFrame`): màn hình đăng nhập, danh sách bạn bè, khung chat, nút gửi file, thanh tiến trình `JProgressBar`.<br>- Xây dựng `ChatClient`: luồng đọc tin nhắn liên tục không làm đơ giao diện.<br>- Hiển thị hộp thoại (Dialog) xác nhận nhận hoặc từ chối file. |
+### Các loại gói tin chính
 
-# | \*\*Anh\*\* | \*\*Giao thức \& Truyền file\*\* | - Thiết kế đặc tả giao thức `Protocol.java` (định dạng bản tin, port chuẩn).<br>- Lập trình `FileSender.java` và `FileReceiver.java`: truyền nhận theo chunk 64KB, tính % tiến độ, xử lý lỗi file rỗng, trùng tên file (`(1).ext`), đứt kết nối.<br>- Lập kịch bản kiểm thử file lớn (> 100 MB), viết tài liệu `README.md` và quản lý Git. |
+| Nhóm | Gói tin |
+|---|---|
+| Phiên | `LOGIN`, `LOGIN_SUCCESS`, `LOGIN_FAILED`, `LOGOUT`, `USER_LIST`, `USER_JOINED`, `USER_LEFT`, `ERROR` |
+| Chat | `MSG`, `GROUP_CREATE`, `GROUP_JOIN`, `GROUP_LEAVE`, `GROUP_MSG`, `GROUP_LIST`, `GROUP_UPDATE` |
+| Tệp 1-1 | `FILE_REQ`, `FILE_RESP` (`ACCEPT` / `REJECT`), `FILE_CANCEL` |
+| Tệp nhóm | `GROUP_FILE_UPLOAD`, `GROUP_FILE_UPLOAD_OK`, `GROUP_FILE`, `GROUP_FILE_DOWNLOAD`, `GROUP_FILE_DOWNLOAD_OK` |
+| Kênh 5001 | `FILE_INIT` (vai trò `SENDER` / `RECEIVER`, kèm `offset` khi truyền tiếp), `READY` |
 
-# 
+### Luồng gửi tệp 1-1
 
-# \---
+1. Người gửi tính SHA-256, sinh khóa AES, gửi `FILE_REQ` qua cổng 5000.
+2. Người nhận chọn Nhận hoặc Từ chối, trả `FILE_RESP`.
+3. Nếu đồng ý, hai bên cùng gửi `FILE_INIT` tới cổng 5001; server ghép cặp và báo `READY`.
+4. Người gửi mã hóa và gửi từng khối 64 KB, người nhận giải mã và ghi vào tệp `.part`.
+5. Người nhận so SHA-256; khớp thì đổi tên `.part` thành tên tệp thật.
 
-# 
+## 4. Cấu trúc mã nguồn
 
-# \## 2. Kiến trúc \& Giao thức truyền thông (Protocol)
+```text
+ChatFileApp/src/
+├── common/
+│   ├── Protocol.java        # Hằng số: cổng, tên lệnh, kích thước khối
+│   ├── CryptoUtil.java      # AES-256 (CTR cho tệp, GCM cho tin nhắn), PBKDF2
+│   ├── HashUtil.java        # SHA-256
+│   ├── FileInfo.java        # Thông tin tệp
+│   └── Message.java         # Bản tin hiển thị
+├── server/
+│   ├── ChatServer.java      # Nhận kết nối chat (cổng 5000), thread pool
+│   ├── ClientHandler.java   # Xử lý một client: đăng nhập, chat, nhóm
+│   ├── FileRelay.java       # Ghép cặp và chuyển tiếp tệp (cổng 5001)
+│   ├── GroupFileStore.java  # Kho tệp nhóm trên server
+│   ├── Packet.java          # Đóng/mở khung 4 byte + JSON
+│   ├── ServerCommands.java  # Hằng số lệnh phía server
+│   ├── ServerLogger.java    # Ghi log console và server.log
+│   ├── ServerFrame.java     # Giao diện quản lý server
+│   └── ServerTestClient.java# Công cụ tự kiểm thử server
+└── client/
+    ├── ClientApp.java       # Điểm khởi động client
+    ├── ChatFrame.java       # Giao diện Swing chính
+    ├── ChatClient.java      # Kết nối, luồng đọc tin
+    ├── FileSender.java      # Gửi tệp theo khối, mã hóa AES
+    ├── FileReceiver.java    # Nhận tệp, giải mã, SHA-256, truyền tiếp
+    └── TransferCrypto.java  # Gói khóa AES, IV và SHA-256 của một phiên
+```
 
-# 
+## 5. Cách chạy
 
-# Hệ thống tách biệt thành 2 kênh socket độc lập để đảm bảo việc truyền file lớn không làm nghẽn luồng chat:
+1. Cài **JDK 22** và Apache NetBeans.
+2. Mở project `ChatFileApp` trong NetBeans, chọn **Clean and Build**.
+3. **Máy server:** chạy `server.ServerFrame` (giao diện quản lý) hoặc `server.ChatServer`, bấm **Bắt đầu**. Mở cổng TCP **5000** và **5001** trên tường lửa.
+4. **Máy client:** chạy `client.ClientApp`, nhập IP của máy server và tên đăng nhập.
+5. Các máy khác mạng có thể dùng mạng ảo (ví dụ ZeroTier) rồi nhập IP ảo của server.
 
-# 
+## 6. Quy trình làm việc trên Git
 
-# \* \*\*Chat Port (`5000`):\*\* Kênh trao đổi chuỗi văn bản UTF-8 (kết thúc bằng `\\n`), phân cách bằng ký tự `|`.
+Repo được tạo trước khi có hướng dẫn quy trình Git của giảng viên, nên lịch sử đầu có commit trực tiếp lên `main`. Từ ngày **[điền ngày bắt đầu áp dụng]**, nhóm làm theo quy trình:
 
-# &#x20; \* `LOGIN|<username>`: Đăng nhập.
-
-# &#x20; \* `LOGIN\_SUCCESS` / `LOGIN\_FAILED|<reason>`: Phản hồi đăng nhập.
-
-# &#x20; \* `USER\_LIST|<user1>,<user2>,...`: Cập nhật danh sách online.
-
-# &#x20; \* `MSG|<toUser>|<content>`: Gửi tin nhắn cá nhân 1-1.
-
-# &#x20; \* `FILE\_REQ|<toUser>|<transferId>|<fileName>|<fileSize>`: Yêu cầu gửi file.
-
-# &#x20; \* `FILE\_RESP|<toUser>|<transferId>|<ACCEPT/REJECT>`: Người nhận đồng ý hoặc từ chối.
-
-# \* \*\*File Relay Port (`5001`):\*\* Kênh truyền dữ liệu nhị phân (Binary Stream).
-
-# &#x20; \* Client gửi lệnh mở đầu: `FILE\_INIT|<transferId>|<SENDER/RECEIVER>\\n`.
-
-# &#x20; \* Sau khi Server báo `READY\\n`, `FileSender` đẩy dữ liệu nhị phân theo từng chunk 64KB (`Protocol.BUFFER\_SIZE`).
-
-# 
-
-# \---
-
-# 
-
-# \## 3. Cấu trúc mã nguồn
-
-# 
-
-# ```text
-
-# ChatFileApp/
-
-# ├── src/
-
-# │   ├── common/
-
-# │   │   ├── Protocol.java       # Bộ hằng số, port và cấu trúc bản tin giao thức
-
-# │   │   ├── FileInfo.java       # Model lưu thông tin tệp tin
-
-# │   │   └── Message.java        # Model bản tin
-
-# │   ├── server/
-
-# │   │   ├── ChatServer.java     # Lắng nghe kết nối chat (Port 5000)
-
-# │   │   ├── ClientHandler.java  # Xử lý luồng riêng cho từng client
-
-# │   │   └── FileRelay.java      # Ghép cặp luồng gửi/nhận file (Port 5001)
-
-# │   └── client/
-
-# │       ├── ChatClient.java     # Kết nối chat phía client
-
-# │       ├── ChatFrame.java      # Giao diện Swing chính
-
-# │       ├── FileSender.java     # Luồng gửi file theo chunk \& cập nhật tiến độ
-
-# │       └── FileReceiver.java   # Luồng nhận file, kiểm tra dung lượng \& chống trùng tên
-
-# └── README.md
-
+- Mỗi đầu việc là một Issue (gán một người, có nhãn và Milestone).
+- Nhánh đặt tên `feature/<MSSV>-issue-<số>-<tên>`; không push trực tiếp lên `main`.
+- Commit theo dạng `feat | fix | refactor | docs: mô tả`.
+- Gộp bằng Pull Request, có ít nhất một thành viên khác xem và Approve.
